@@ -21,19 +21,18 @@ from .cf_challenge.service import Challenges
 from .cf_challenge.storage import Store
 
 HELP = """CF 群聊解题挑战
-/cf 出题：从本群范围抽取新题
-/cf 题面：重发本轮中文题面
+/new：从本群范围随机抽取新题
+/cur：重发本轮中文题面
 /cf 范围：查看本群选题条件
 /cf 范围 1200 1800：修改难度，保留其他条件
 /cf 范围 {"tags":["dp"],"exclude_tags":[],"min_contest":1500,"max_contest":2200}
 JSON 也支持 min_rating、max_rating；未填写的条件保留原值。
 tags 中的标签需全部满足；带空格的标签也可以放在 JSON 字符串内。
-/cf 揭晓：结束本轮并公布来源
-@机器人 你的解法：评审本轮题的思路
-@机器人 /cf 提交 你的解法：显式提交
-默认仅 AstrBot 管理员及 QQ 群主／管理员能出题、改范围、提前揭晓。
-每人提交有冷却时间；补充时请把完整方案一起重发。
-只收到 @、没有文字时不评审。"""
+/submit <sol>：提交文字解法，不需要 @机器人
+/giveup：放弃本轮并公布原题来源
+默认仅 AstrBot 管理员及 QQ 群主／管理员能出题、改范围、放弃本轮。
+同群解答按提交顺序排队；本轮通过后不再评审剩余提交。
+每人提交有冷却时间；补充时请把完整方案一起重发。"""
 
 
 class CFChallengePlugin(Star):
@@ -174,8 +173,19 @@ class CFChallengePlugin(Star):
             solution,
             self._evaluator(event),
         )
-        name = event.get_sender_name() or str(event.get_sender_id())
-        await self._say(event, review_text(review, round_, name))
+        text = review_text(review, round_)
+        if review.verdict == "accepted":
+            await event.send(
+                event.chain_result(
+                    [
+                        Plain("🎉恭喜"),
+                        At(qq=str(event.get_sender_id())),
+                        Plain(" " + text),
+                    ]
+                )
+            )
+        else:
+            await self._say(event, text)
 
     async def _error(self, event: AstrMessageEvent, exc: Exception) -> None:
         if isinstance(exc, ChallengeError):
@@ -185,20 +195,46 @@ class CFChallengePlugin(Star):
             logger.error("CF 挑战处理失败（%s）", type(exc).__name__)
             await self._say(event, "处理失败，请管理员检查插件数据和日志后重试。")
 
+    @filter.command("new")
+    async def new(self, event: AstrMessageEvent):
+        """从本群范围随机抽取新题。"""
+        await self._execute(event, "new")
+
+    @filter.command("cur")
+    async def cur(self, event: AstrMessageEvent):
+        """重发当前题目。"""
+        await self._execute(event, "cur")
+
+    @filter.command("submit")
+    async def submit(self, event: AstrMessageEvent):
+        """提交完整文字解法，无需 @机器人。"""
+        parts = event.get_message_str().strip().split(maxsplit=1)
+        await self._execute(event, "submit", parts[1] if len(parts) > 1 else "")
+
+    @filter.command("giveup")
+    async def giveup(self, event: AstrMessageEvent):
+        """放弃当前题目并公布原题。"""
+        await self._execute(event, "giveup")
+
     @filter.command("cf")
     async def cf(self, event: AstrMessageEvent):
-        """CF 算法挑战：出题、题面、范围、提交、揭晓。"""
-        if not self._allowed(event):
-            return
-        self._claim(event)
+        """查看帮助或管理本群选题范围。"""
         text = event.get_message_str().strip().lstrip("/")
         args = re.sub(r"^cf(?:\s+|$)", "", text, count=1).strip()
         parts = args.split(maxsplit=1)
-        command = parts[0] if parts else ""
+        command = "范围" if parts and parts[0] == "范围" else "help"
         query = parts[1] if len(parts) > 1 else ""
+        await self._execute(event, command, query)
+
+    async def _execute(
+        self, event: AstrMessageEvent, command: str, query: str = ""
+    ) -> None:
+        if not self._allowed(event):
+            return
+        self._claim(event)
         scope = self._scope(event)
         try:
-            if command in ("", "帮助", "help"):
+            if command == "help":
                 await self._say(event, HELP)
             elif command == "范围":
                 current = self.store.get_range(scope, self.challenges.default_range)
@@ -211,7 +247,7 @@ class CFChallengePlugin(Star):
                     )
                 else:
                     await self._say(event, current.describe())
-            elif command == "出题":
+            elif command == "new":
                 self._control(event)
                 await self._say(event, "正在读取原题、翻译并校对，请稍候。")
                 await self.challenges.start(
@@ -219,42 +255,19 @@ class CFChallengePlugin(Star):
                     self._evaluator(event),
                     lambda round_: self._deliver(event, round_),
                 )
-            elif command == "题面":
+            elif command == "cur":
                 round_ = self.store.active(scope)
                 if round_ is None:
                     raise ChallengeError("本群没有进行中的题。")
                 await self._deliver(event, round_)
-            elif command == "揭晓":
+            elif command == "giveup":
                 self._control(event)
                 round_ = await self.challenges.reveal(scope)
-                await self._say(event, "本轮已结束。\n" + reveal_text(round_))
-            elif command == "提交":
+                await self._say(event, "本轮已放弃。\n" + reveal_text(round_))
+            elif command == "submit":
                 await self._submit(event, query)
             else:
                 await self._say(event, HELP)
-        except Exception as exc:
-            await self._error(event, exc)
-
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
-    async def on_solution(self, event: AstrMessageEvent):
-        if not self._allowed(event):
-            return
-        if not any(
-            isinstance(part, At) and str(part.qq) == str(event.get_self_id())
-            for part in event.get_messages()
-        ):
-            return
-        text = event.get_message_str().strip()
-        if re.match(r"^/?cf(?:\s|$)", text):
-            return  # 交给命令处理器，避免同一条消息提交两次。
-        if not self.store.active(self._scope(event)):
-            return
-        self._claim(event)
-        if not text:
-            await self._say(event, "请在 @机器人 后写上你的解题思路。")
-            return
-        try:
-            await self._submit(event, text)
         except Exception as exc:
             await self._error(event, exc)
 

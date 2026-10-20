@@ -30,9 +30,9 @@ class Challenges:
         self.max_solution = max_solution
         self._locks: dict[str, asyncio.Lock] = {}
 
-    def _lock(self, scope: str) -> asyncio.Lock:
+    def _lock(self, scope: str, *, wait: bool = False) -> asyncio.Lock:
         lock = self._locks.setdefault(scope, asyncio.Lock())
-        if lock.locked():
+        if not wait and lock.locked():
             raise ChallengeError("本群正在出题或评审，请等这次处理完成后再试。")
         return lock
 
@@ -45,7 +45,8 @@ class Challenges:
         async with self._lock(scope):
             if self.store.active(scope):
                 raise ChallengeError(
-                    "本群还有未完成的题。可以重发题面，或由管理员先揭晓。"
+                    "本群还有未完成的题。可用 /cur 重发题面，"
+                    "或由管理员用 /giveup 放弃。"
                 )
             selection = self.store.get_range(scope, self.default_range)
             seen = self.store.seen(scope)
@@ -90,15 +91,17 @@ class Challenges:
         self, scope: str, sender: str, solution: str, evaluator: Evaluator
     ) -> tuple[Round, Review]:
         if not solution.strip():
-            raise ChallengeError("请在 @机器人 后写上具体解题思路。")
+            raise ChallengeError("请在 /submit 后写上具体解题思路。")
         if len(solution) > self.max_solution:
             raise ChallengeError(f"解法太长，请控制在 {self.max_solution} 字以内。")
-        async with self._lock(scope):
+        submitted_round = self.store.active(scope)
+        if submitted_round is None:
+            raise ChallengeError("本群还没有进行中的题，请先让管理员发送 /new。")
+        # asyncio.Lock 按等待顺序唤醒；入队前绑定轮次，旧解答不能用于新题。
+        async with self._lock(scope, wait=True):
             round_ = self.store.active(scope)
-            if round_ is None:
-                raise ChallengeError(
-                    "本群还没有进行中的题，请先让管理员发送 /cf 出题。"
-                )
+            if round_ is None or round_.id != submitted_round.id:
+                raise ChallengeError("提交对应的题目已结束，本次排队解答不再评审。")
             now = time.time()
             elapsed = now - round_.attempts.get(sender, 0)
             if elapsed < self.cooldown:

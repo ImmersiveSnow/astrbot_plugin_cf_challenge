@@ -47,7 +47,8 @@ def statement_sections(round_: Round) -> list[StatementSection]:
     sections = [
         StatementSection(
             f"算法挑战 #{round_.id[:8]}",
-            "请 @机器人 发送解题思路，说明关键步骤、正确性理由和复杂度。\n"
+            "请用 /submit <sol> 提交解题思路，说明算法怎么做、为什么可行；"
+            "可用口语表达。\n"
             "评审结果：通过／有错误／需要补充。通过后揭晓原题。\n"
             f"时间限制：{source.time_limit}\n内存限制：{source.memory_limit}",
         ),
@@ -88,13 +89,11 @@ def reveal_text(round_: Round) -> str:
     return f"原题：CF {p.key} · {p.name}\n难度：{p.rating}\n{p.url}"
 
 
-def review_text(review: Review, round_: Round, sender: str) -> str:
+def review_text(review: Review, round_: Round) -> str:
     if review.verdict == "accepted":
+        p = round_.problem
         return (
-            f"🎉 恭喜 {sender}，解法评审通过！\n"
-            f"判断依据：{review.feedback}\n"
-            f"关键理由：{review.proof}\n复杂度：{review.complexity}\n"
-            f"{reveal_text(round_)}\n（这是文字解法评审，未经过代码评测。）"
+            f"拿下本题 first blood！本题是 CF {p.key} · {p.name} ({p.rating}) {p.url}"
         )
     title = "发现错误" if review.verdict == "incorrect" else "需要补充"
     text = f"{title}\n{review.feedback}"

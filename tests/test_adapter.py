@@ -9,6 +9,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from cf_challenge.models import Review
+
 
 @pytest.fixture
 def adapter(tmp_path, monkeypatch):
@@ -52,8 +54,6 @@ def adapter(tmp_path, monkeypatch):
             "AstrMessageEvent": object,
             "filter": SimpleNamespace(
                 command=decorator,
-                event_message_type=decorator,
-                EventMessageType=SimpleNamespace(GROUP_MESSAGE="group"),
             ),
         },
         "astrbot.api.star": {
@@ -96,13 +96,10 @@ def adapter(tmp_path, monkeypatch):
 
 
 class Event:
-    def __init__(
-        self, text="cf 帮助", *, group="123", sender="alice", role="member", at=None
-    ):
+    def __init__(self, text="cf 帮助", *, group="123", sender="alice", role="member"):
         self.text, self.group, self.sender = text, group, sender
         self.message_obj = SimpleNamespace(raw_message={"sender": {"role": role}})
         self.unified_msg_origin = f"qq:group:{group}_{sender}"
-        self.messages = at or []
         self.sent = []
         self.stopped, self.call_llm = False, True
 
@@ -126,9 +123,6 @@ class Event:
 
     def get_message_str(self):
         return self.text
-
-    def get_messages(self):
-        return self.messages
 
     def is_admin(self):
         return False
@@ -169,26 +163,103 @@ def test_command_permissions_and_group_ranges(adapter):
     asyncio.run(scenario())
 
 
-def test_at_target_and_command_not_submitted_twice(adapter, round_):
+def test_commands_without_mentions_preserve_group_lifecycle(
+    adapter, problem, source, prepared, monkeypatch
+):
+    async def scenario():
+        plugin = adapter.CFChallengePlugin(object(), {"statement_images": False})
+
+        async def problems():
+            return [problem]
+
+        async def statement(_):
+            return source
+
+        class Evaluation:
+            async def prepare(self, _):
+                return prepared
+
+            async def judge(self, *_):
+                return Review("accepted", "求和方案正确", "逐个累加保持前缀和", "O(n)")
+
+        monkeypatch.setattr(plugin.codeforces, "problems", problems)
+        monkeypatch.setattr(plugin.codeforces, "statement", statement)
+        monkeypatch.setattr(plugin, "_evaluator", lambda _: Evaluation())
+        scope = plugin._scope(Event())
+        try:
+            denied = Event("/new")
+            await plugin.new(denied)
+            assert plugin.store.active(scope) is None
+            assert "只有" in denied.sent[0]
+
+            start = Event("/new", role="admin")
+            await plugin.new(start)
+            active = plugin.store.active(scope)
+            assert active.status == "active"
+            assert not start.call_llm and start.stopped
+            duplicate = Event("/new", role="admin")
+            await plugin.new(duplicate)
+            assert plugin.store.active(scope).id == active.id
+
+            current = Event("/cur", sender="bob")
+            await plugin.cur(current)
+            text = "\n".join(node.content[0].text for node in current.sent[0][0].nodes)
+            assert prepared.body in text
+            assert source.samples[0][0] in text
+            assert problem.name not in text and problem.url not in text
+            assert "PRIVATE_REFERENCE" not in text
+
+            denied = Event("/giveup", sender="bob")
+            await plugin.giveup(denied)
+            assert plugin.store.active(scope).id == active.id
+            assert "只有" in denied.sent[0]
+            assert problem.url not in denied.sent[0]
+
+            other = Event("/new", group="456", role="owner")
+            await plugin.new(other)
+            other_scope = plugin._scope(other)
+            assert plugin.store.active(other_scope).status == "active"
+            solution = Event("/submit 逐个累加所有整数。\n正确性：前缀和不变量。O(n)。")
+            await plugin.submit(solution)
+            assert plugin.store.active(scope) is None
+            assert plugin.store.active(other_scope).status == "active"
+            announcement = solution.sent[0]
+            mentions = [part for part in announcement if isinstance(part, adapter.At)]
+            assert len(mentions) == 1 and mentions[0].qq == solution.sender
+            text = "".join(
+                part.text for part in announcement if isinstance(part, adapter.Plain)
+            )
+            assert problem.url in text and problem.name in text
+            assert "求和方案正确" not in text and "逐个累加保持前缀和" not in text
+            assert not solution.call_llm and solution.stopped
+
+            abandon = Event("/giveup", group="456", role="owner")
+            await plugin.giveup(abandon)
+            assert plugin.store.active(other_scope) is None
+            assert problem.url in abandon.sent[0]
+            current = Event("/cur", group="456")
+            await plugin.cur(current)
+            assert "没有进行中" in current.sent[0]
+        finally:
+            await plugin.terminate()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("text", ["/submit", "/submit   \n  "])
+def test_empty_submission_keeps_round_and_cooldown(adapter, round_, text):
     async def scenario():
         plugin = adapter.CFChallengePlugin(object(), {})
-        submitted = []
-
-        async def submit(event, text):
-            submitted.append(text)
-
-        plugin._submit = submit
-        event = Event("逐个求和", at=[adapter.At("999")])
+        event = Event(text)
         round_.scope = plugin._scope(event)
         plugin.store.save(round_)
         try:
-            await plugin.on_solution(Event("普通聊天"))
-            await plugin.on_solution(Event("问别人", at=[adapter.At("888")]))
-            await plugin.on_solution(Event("cf 提交 求和", at=[adapter.At("999")]))
-            assert submitted == []
-            await plugin.on_solution(event)
-            assert submitted == ["逐个求和"]
-            assert not event.call_llm and event.stopped
+            await plugin.submit(event)
+            active = plugin.store.active(round_.scope)
+            assert active.id == round_.id and active.attempts == {}
+            assert "具体解题思路" in event.sent[0]
+            assert round_.problem.url not in event.sent[0]
+            assert event.stopped and not event.call_llm
         finally:
             await plugin.terminate()
 
@@ -292,12 +363,16 @@ def test_single_image_send_failure_propagates(adapter, round_):
     asyncio.run(scenario())
 
 
-def test_private_or_disallowed_group_is_ignored(adapter):
+@pytest.mark.parametrize("command", ["cf", "new", "cur", "submit", "giveup"])
+def test_private_or_disallowed_group_is_ignored(adapter, command):
     async def scenario():
         plugin = adapter.CFChallengePlugin(object(), {"allowed_groups": ["123"]})
         try:
-            for event in (Event(group=""), Event(group="456")):
-                await plugin.cf(event)
+            for event in (
+                Event(f"/{command}", group=""),
+                Event(f"/{command}", group="456"),
+            ):
+                await getattr(plugin, command)(event)
                 assert not event.sent and not event.stopped
         finally:
             await plugin.terminate()

@@ -266,12 +266,12 @@ def test_only_public_fields_sent_and_failure_does_not_reveal(round_):
     feedback = Review(
         "needs_more", f"See CF 1000A Hidden Identity {round_.problem.url}", "", ""
     )
-    text = review_text(feedback, round_, "Alice")
+    text = review_text(feedback, round_)
     assert (
         "1000A" not in text and "Hidden Identity" not in text and "https://" not in text
     )
     assert "需要补充" in text
-    assert "1000A" in review_text(Review(**verdict()), round_, "Alice")
+    assert "1000A" in review_text(Review(**verdict()), round_)
 
 
 def test_sample_text_is_not_redacted(round_):
@@ -360,31 +360,175 @@ def test_full_flow_groups_winner_and_no_repeat(tmp_path, problem, source, prepar
     run(scenario())
 
 
-def test_concurrent_submissions_do_not_both_win(tmp_path, problem, source, prepared):
+@pytest.mark.parametrize("winner", [0, 1, 2])
+def test_submissions_queue_in_order_until_first_winner(
+    tmp_path, problem, source, prepared, winner
+):
     async def scenario():
-        entered, release = asyncio.Event(), asyncio.Event()
+        class GatedEvaluation(Evaluation):
+            def __init__(self, review):
+                super().__init__(prepared, review)
+                self.entered, self.release = asyncio.Event(), asyncio.Event()
 
-        class SlowEvaluation(Evaluation):
-            async def judge(self, *_):
-                entered.set()
-                await release.wait()
-                return self.review
+            async def judge(self, *args):
+                self.entered.set()
+                await self.release.wait()
+                return await super().judge(*args)
 
         store = Store(tmp_path)
         service = Challenges(store, Catalog(problem, source), ProblemRange())
-        evaluator = SlowEvaluation(prepared)
-        await service.start("group", evaluator, deliver)
-        task = asyncio.create_task(service.submit("group", "alice", "Sum", evaluator))
-        await entered.wait()
+        evaluators = [
+            GatedEvaluation(
+                Review(
+                    **verdict(
+                        "accepted"
+                        if i == winner
+                        else ("needs_more" if i == 0 else "incorrect")
+                    )
+                )
+            )
+            for i in range(3)
+        ]
+        tasks = []
+
+        async def submit(index, started):
+            started.set()
+            return await service.submit("group", str(index), "Sum", evaluators[index])
+
         try:
-            with pytest.raises(ChallengeError, match="正在"):
-                await service.submit("group", "bob", "Sum", evaluator)
+            await service.start("group", Evaluation(prepared), deliver)
+            for index in range(3):
+                started = asyncio.Event()
+                tasks.append(asyncio.create_task(submit(index, started)))
+                await started.wait()
+            assert evaluators[0].entered.is_set()
+            assert not any(e.entered.is_set() for e in evaluators[1:])
+            with pytest.raises(ChallengeError):
+                await service.reveal("group")
+
+            # 另一群无需等待本群队列。
+            await service.start("other", Evaluation(prepared), deliver)
+            other, _ = await service.submit(
+                "other", "outsider", "Sum", Evaluation(prepared)
+            )
+            assert other.status == "solved"
+            for index in range(winner + 1):
+                await evaluators[index].entered.wait()
+                assert not any(e.entered.is_set() for e in evaluators[index + 1 :])
+                evaluators[index].release.set()
+                round_, review = await tasks[index]
+                if index < winner:
+                    assert review.verdict != "accepted"
+                    assert store.active("group").id == round_.id
+                else:
+                    assert round_.status == "solved" and round_.solver == str(winner)
+                    assert store.active("group") is None
+            for index in range(winner + 1, 3):
+                with pytest.raises(ChallengeError):
+                    await tasks[index]
+                assert not evaluators[index].entered.is_set()
         finally:
-            release.set()
-            await task
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             store.close()
 
-    run(scenario())
+    run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("outcome", ["error", "cancel"])
+def test_queue_continues_after_failure_and_waiter_cancellation(
+    tmp_path, problem, source, prepared, outcome
+):
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class InterruptedEvaluation(Evaluation):
+            async def judge(self, *_):
+                entered.set()
+                await release.wait()
+                raise RuntimeError("model unavailable")
+
+        store = Store(tmp_path)
+        service = Challenges(store, Catalog(problem, source), ProblemRange())
+        skipped = Evaluation(prepared)
+        surviving = Evaluation(prepared, Review(**verdict("needs_more")))
+        tasks = []
+
+        async def submit(sender, evaluator, started):
+            started.set()
+            return await service.submit("group", sender, "Sum", evaluator)
+
+        try:
+            await service.start("group", Evaluation(prepared), deliver)
+            first = asyncio.create_task(
+                service.submit("group", "first", "Sum", InterruptedEvaluation(prepared))
+            )
+            tasks.append(first)
+            await entered.wait()
+            for sender, evaluator in (("cancelled", skipped), ("last", surviving)):
+                started = asyncio.Event()
+                tasks.append(asyncio.create_task(submit(sender, evaluator, started)))
+                await started.wait()
+            tasks[1].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[1]
+            if outcome == "cancel":
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+            else:
+                release.set()
+                with pytest.raises(RuntimeError):
+                    await first
+            round_, review = await tasks[2]
+            assert review.verdict == "needs_more"
+            assert skipped.calls == 0 and surviving.calls == 1
+            assert set(round_.attempts) == {"first", "last"}
+            assert store.active("group").id == round_.id
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            store.close()
+
+    run(asyncio.wait_for(scenario(), 5))
+
+
+def test_queued_solution_cannot_be_judged_against_a_new_round(
+    tmp_path, problem, source, prepared
+):
+    async def scenario():
+        store = Store(tmp_path)
+        service = Challenges(store, Catalog(problem, source), ProblemRange())
+        evaluator = Evaluation(prepared)
+        started = asyncio.Event()
+        task = None
+
+        async def submit():
+            started.set()
+            return await service.submit("group", "alice", "Sum", evaluator)
+
+        try:
+            old = await service.start("group", Evaluation(prepared), deliver)
+            async with service._lock("group"):
+                task = asyncio.create_task(submit())
+                await started.wait()
+                store.save(replace(old, status="revealed"))
+                new = replace(old, id="new-round", attempts={})
+                store.save(new)
+            with pytest.raises(ChallengeError):
+                await task
+            assert evaluator.calls == 0
+            assert store.active("group").id == new.id
+            assert store.active("group").attempts == {}
+        finally:
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            store.close()
+
+    run(asyncio.wait_for(scenario(), 5))
 
 
 def test_failed_delivery_is_not_active_or_seen(tmp_path, problem, source, prepared):

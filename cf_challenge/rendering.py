@@ -85,9 +85,8 @@ async () => {
     add({top, bottom, height: bottom - top});
   }
   // Do not leave a heading at the end of a page without its first content line.
-  for (const section of paper.querySelectorAll('section')) {
-    const heading = section.querySelector('h2');
-    const content = section.querySelector('.content');
+  for (const heading of paper.querySelectorAll('section > h2')) {
+    const content = heading.parentElement.querySelector('.content');
     const range = document.createRange();
     range.selectNodeContents(content);
     const first = [...range.getClientRects()].find(rect => rect.width > 0);
@@ -124,10 +123,11 @@ async () => {
 
 def _document(sections: list[StatementSection]) -> str:
     parts = []
-    for section in sections:
+    for index, section in enumerate(sections):
         tag = "pre" if section.preformatted else "div"
+        heading = f"<h2>{escape(section.title)}</h2>" if index else ""
         parts.append(
-            f"<section><h2>{escape(section.title)}</h2>"
+            f"<section>{heading}"
             f'<{tag} class="content">{escape(section.text)}</{tag}></section>'
         )
     return (
@@ -142,7 +142,6 @@ def _document(sections: list[StatementSection]) -> str:
         "section:last-child{margin-bottom:0;}"
         "h2{font-size:26px;line-height:1.5;margin:0 0 14px;padding-bottom:8px;"
         "border-bottom:2px solid #d8e2ec;overflow-wrap:anywhere;}"
-        "section:first-child h2{font-size:32px;color:#173b5d;}"
         ".content{margin:0;font-size:24px;line-height:1.8;white-space:pre-wrap;"
         "overflow-wrap:anywhere;word-break:normal;}"
         "pre.content{font-family:Consolas,'Cascadia Mono','Microsoft YaHei',monospace;"

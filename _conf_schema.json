@@ -25,7 +25,7 @@
     }
   },
   "admin_only_controls": {
-    "description": "仅管理员能出题、改范围、提前揭晓",
+    "description": "仅管理员能出题、改范围、放弃本轮",
     "type": "bool",
     "default": true
   },
