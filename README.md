@@ -15,6 +15,10 @@
 5. 配置允许使用的群号；`allowed_groups` 留空表示所有群。默认仅 AstrBot 管理员、QQ 群主和群管理员能出题、改范围、放弃本轮。
 6. 设置默认选题范围。若当前部署环境也无法读取 CF 题面，先按后文导入题面，再开启 `local_only`。
 
+也可以在 AstrBot 面板通过 Git URL 安装本仓库：`https://github.com/ImmersiveSnow/astrbot_plugin_cf_challenge`。更新时，先使用插件菜单中的更新／强制更新入口，并核对来源仍是本仓库，再重载插件；**只重载不会下载 GitHub 上的新代码**。菜单名称随 AstrBot 版本而异。Git URL 安装不一定保留 `.git`，不要直接假定插件目录可以执行 `git pull`。
+
+`metadata.yaml` 的 `version` 用于声明插件版本，`repo` 用于声明仓库来源；发布更新时应递增版本号。Git URL 安装并不自动成为市场安装，补充这两个字段也不保证出现市场更新提示，参见 [AstrBot 官方更新规则](https://github.com/AstrBotDevs/AstrBot/wiki/zh-dev-plugin-market-2026-06-27#13-更新规则)。更新不需要删除插件数据目录。
+
 在插件目录中，用实际启动 AstrBot 的 Python 执行：
 
 ```text

@@ -1,8 +1,9 @@
 name: astrbot_plugin_cf_challenge
 display_name: CF 群聊解题挑战
 desc: 按范围抽取 CF 题目，以公式排版图片发送中文题面，评审文字解法后揭晓来源
-version: v0.2.0
+version: v0.2.1
 author: Lukejq0517
+repo: https://github.com/ImmersiveSnow/astrbot_plugin_cf_challenge
 astrbot_version: ">=4.5.7,<5"
 support_platforms:
   - aiocqhttp
