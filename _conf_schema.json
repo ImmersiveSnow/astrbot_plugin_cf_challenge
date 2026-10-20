@@ -1,0 +1,53 @@
+{
+  "allowed_groups": {
+    "description": "允许使用的 QQ 群号",
+    "type": "list",
+    "default": [],
+    "hint": "留空表示所有群；群号填写字符串。"
+  },
+  "provider_id": {
+    "description": "翻译和解法评审使用的模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空使用当前会话的模型。模型需支持按要求输出 JSON，且擅长算法推理。"
+  },
+  "selection": {
+    "description": "新群默认选题范围",
+    "type": "object",
+    "items": {
+      "min_rating": {"type": "int", "default": 800, "description": "最低难度"},
+      "max_rating": {"type": "int", "default": 1600, "description": "最高难度"},
+      "tags": {"type": "list", "default": [], "description": "必须全部包含的标签"},
+      "exclude_tags": {"type": "list", "default": [], "description": "排除的标签"},
+      "min_contest": {"type": "int", "default": 1, "description": "最小比赛编号"},
+      "max_contest": {"type": "int", "default": 99999, "description": "最大比赛编号"}
+    }
+  },
+  "admin_only_controls": {
+    "description": "仅管理员能出题、改范围、提前揭晓",
+    "type": "bool",
+    "default": true
+  },
+  "merged_forward": {
+    "description": "QQ 使用聊天记录式合并转发",
+    "type": "bool",
+    "default": true,
+    "hint": "需要 OneBot v11（如 NapCat）。转发失败时改为逐条发送（包括图片）。"
+  },
+  "statement_images": {
+    "description": "将题面排版为图片发送",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后直接发送完整文字题面。"
+  },
+  "local_only": {
+    "description": "仅从已缓存或导入本地题面的题目中抽题",
+    "type": "bool",
+    "default": false,
+    "hint": "HTTP 与浏览器均无法读取时可启用。使用插件数据目录 statements 中的缓存或导入题面。"
+  },
+  "cooldown_seconds": {"type": "int", "default": 30, "description": "每人提交间隔（秒）"},
+  "max_solution_chars": {"type": "int", "default": 6000, "description": "单次解法最大字数"},
+  "model_timeout_seconds": {"type": "int", "default": 120, "description": "单次模型调用超时（秒）"}
+}

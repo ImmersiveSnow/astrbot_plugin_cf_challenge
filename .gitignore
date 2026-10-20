@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.sqlite3*
+dist/
+.local-data/
+.env
+.env.*
+!.env.example
+config.yaml
+config.json
+*.pem
+*.key
+*.log
+playwright/.auth/
