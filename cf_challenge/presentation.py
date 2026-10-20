@@ -92,8 +92,4 @@ def review_text(review: Review, round_: Round) -> str:
         return (
             f"拿下本题 first blood！本题是 CF {p.key} · {p.name} ({p.rating}) {p.url}"
         )
-    title = "发现错误" if review.verdict == "incorrect" else "需要补充"
-    text = f"{title}\n{review.feedback}"
-    if review.verdict == "incorrect":
-        text += "\n错误依据／反例：" + review.counterexample
-    return hide_identity(text, round_.problem)
+    return hide_identity(review.feedback, round_.problem)

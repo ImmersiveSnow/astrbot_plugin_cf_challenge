@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 import httpx
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 from . import browser
-from .models import ChallengeError, Problem, Statement
+from .models import ChallengeError, Problem, Statement, UnsupportedStatement
 
 
 def _text(element: Tag | None) -> str:
@@ -54,7 +55,9 @@ def _normalize_math(root: Tag) -> None:
         kind = script.get("type", "").split(";", 1)[0].strip().lower()
         tex = script.string
         if kind != "math/tex" or tex is None or not tex.strip():
-            raise ChallengeError("题面中的公式没有可恢复的 TeX 源码，已停止出题。")
+            raise UnsupportedStatement(
+                "题面中的公式没有可恢复的 TeX 源码，已停止出题。"
+            )
 
         rendered = previous_tag(script)
         if rendered is not None and set(rendered.get("class", ())).intersection(
@@ -71,7 +74,9 @@ def _normalize_math(root: Tag) -> None:
                 or len(frames) != 1
                 or frames[0].get("id") != f"{source_id}-Frame"
             ):
-                raise ChallengeError("题面含无法对应到 TeX 的数学渲染，已停止出题。")
+                raise UnsupportedStatement(
+                    "题面含无法对应到 TeX 的数学渲染，已停止出题。"
+                )
             rendered.decompose()
 
         preview = previous_tag(script)
@@ -93,7 +98,132 @@ def _normalize_math(root: Tag) -> None:
             .lower()
             .startswith(("mathjax", "mjx-", "mjx_"))
         ):
-            raise ChallengeError("题面含无法还原的数学渲染格式，已停止出题。")
+            raise UnsupportedStatement("题面含无法还原的数学渲染格式，已停止出题。")
+
+
+_INDEX_BASE = re.compile(r"(?:[^\W\d]\w*|\d+(?:\.\d+)?|\([^()]+\)|\[[^\[\]]+\])$")
+_HTML_MATH_INLINE = {"span", "i", "em", "b", "strong"}
+_HTML_MATH_ESCAPES = str.maketrans(
+    {
+        "{": r"\{",
+        "}": r"\}",
+        "_": r"\_",
+        "^": r"\textasciicircum{}",
+        "~": r"\textasciitilde{}",
+        "&": r"\&",
+        "%": r"\%",
+        "#": r"\#",
+    }
+)
+
+
+def _html_math_tex(element: Tag) -> str:
+    """只转换显式 HTML 数学结构，不把内容当作可执行的 TeX 命令。"""
+    parts: list[str] = []
+    scripts: set[str] = set()
+    for child in element.children:
+        if isinstance(child, Comment):
+            continue
+        if isinstance(child, NavigableString):
+            text = str(child)
+            if "$" in text or "\\" in text:
+                raise UnsupportedStatement(
+                    "题面混合了无法可靠转换的公式格式，已停止出题。"
+                )
+            parts.append(text.translate(_HTML_MATH_ESCAPES))
+            if text.strip():
+                scripts.clear()
+            continue
+        if child.name not in _HTML_MATH_INLINE and child.name not in {"sub", "sup"}:
+            raise UnsupportedStatement("题面中的上下标含不支持的结构，已停止出题。")
+        tex = _html_math_tex(child).strip()
+        if not tex:
+            raise UnsupportedStatement("题面中的数学结构为空，已停止出题。")
+        if child.name in {"sub", "sup"}:
+            if not "".join(parts).strip() or child.name in scripts:
+                raise UnsupportedStatement("题面中的上下标无法可靠对应，已停止出题。")
+            scripts.add(child.name)
+            operator = "_" if child.name == "sub" else "^"
+            parts.append(f"{operator}{{{tex}}}")
+        else:
+            if child.name in {"b", "strong"}:
+                tex = r"\boldsymbol{" + tex + "}"
+            elif child.select_one("sub, sup") is not None:
+                tex = "{" + tex + "}"
+            parts.append(tex)
+            scripts.clear()
+    return "".join(parts)
+
+
+def _normalize_html_indices(root: Tag) -> None:
+    """在丢弃 HTML 标签前，保留上下标与明确的公式基底；样例保持原样。"""
+    for formula in root.select(".tex-span"):
+        if (
+            formula.find_parent(class_="sample-tests") is not None
+            or formula.find_parent(class_="tex-span") is not None
+            or formula.select_one("sub, sup") is None
+        ):
+            continue
+        formula.replace_with(f"$$${_html_math_tex(formula).strip()}$$$")
+
+    def sibling(node, direction):
+        result = getattr(node, direction)
+        while isinstance(result, Comment) or (
+            isinstance(result, NavigableString) and not result.strip()
+        ):
+            result = getattr(result, direction)
+        return result
+
+    # 从外层的末尾处理，避免先拆掉作为另一个上下标基底的内层公式。
+    for index in reversed(root.select("sub, sup")):
+        if (
+            index.find_parent(class_="sample-tests") is not None
+            or index.find_parent(["sub", "sup"]) is not None
+            or not any(parent is root for parent in index.parents)
+        ):
+            continue
+        first = index
+        base = sibling(first, "previous_sibling")
+        while isinstance(base, Tag) and base.name in {"sub", "sup"}:
+            first = base
+            base = sibling(first, "previous_sibling")
+        text = str(base) if isinstance(base, NavigableString) else ""
+        match = _INDEX_BASE.search(text.rstrip()) if text else None
+        if match is not None:
+            prefix = text[: match.start()]
+            tex = match.group().translate(_HTML_MATH_ESCAPES)
+        elif (
+            isinstance(base, Tag)
+            and base.name in _HTML_MATH_INLINE
+            and _INDEX_BASE.fullmatch(base.get_text().strip())
+        ):
+            prefix = ""
+            tex = _html_math_tex(base).strip()
+            if base.name in {"b", "strong"}:
+                tex = r"\boldsymbol{" + tex + "}"
+            elif base.select_one("sub, sup") is not None:
+                tex = "{" + tex + "}"
+        else:
+            raise UnsupportedStatement("题面中的上下标缺少明确基底，已停止出题。")
+        scripts: set[str] = set()
+        last = first
+        while True:
+            content = _html_math_tex(last).strip()
+            if not content or last.name in scripts:
+                raise UnsupportedStatement("题面中的上下标无法可靠对应，已停止出题。")
+            scripts.add(last.name)
+            operator = "_" if last.name == "sub" else "^"
+            tex += f"{operator}{{{content}}}"
+            following = sibling(last, "next_sibling")
+            if not isinstance(following, Tag) or following.name not in {"sub", "sup"}:
+                break
+            last = following
+        node, stop = base.next_sibling, last.next_sibling
+        base.replace_with(f"{prefix}$$${tex}$$$")
+        while node is not None and node is not stop:
+            following = node.next_sibling
+            node.extract()
+            node = following
 
 
 def parse_statement(html: str) -> Statement:
@@ -101,14 +231,15 @@ def parse_statement(html: str) -> Statement:
     root = soup.select_one(".problem-statement")
     if root is None:
         raise ChallengeError("返回的网页中没有完整题面，可能被网站访问验证拦截。")
-    # 样例文本按网站原样抽取；仅解析题面其他区域中的 MathJax。
+    # 样例按网站原样抽取；其他区域先恢复公式和显式上下标，再提取文字。
     sample_root = root.select_one(".sample-tests")
     samples = sample_root.select(".input pre") if sample_root else []
     outputs = sample_root.select(".output pre") if sample_root else []
     _normalize_math(root)
-    # 图和表格丢失会改变题意。首版仅支持纯文字题，遇到它们停止出题。
+    _normalize_html_indices(root)
+    # 图和表格丢失会改变题意，仅支持文字和可恢复的 TeX，不能丢弃其他内容。
     if root.select("img, svg, table, script, math"):
-        raise ChallengeError(
+        raise UnsupportedStatement(
             "这道题含图片、表格或不支持的公式格式，首版暂不能完整展示。"
         )
     inp = root.select_one(".input-specification")

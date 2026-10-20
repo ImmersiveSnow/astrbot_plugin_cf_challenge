@@ -2,8 +2,10 @@
 
 import asyncio
 import importlib.util
+import json
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -180,7 +182,13 @@ def test_commands_without_mentions_preserve_group_lifecycle(
                 return prepared
 
             async def judge(self, *_):
-                return Review("accepted", "求和方案正确", "逐个累加保持前缀和", "O(n)")
+                return Review(
+                    "accepted",
+                    "求和方案正确",
+                    "逐个累加保持前缀和",
+                    "O(n)",
+                    complete=True,
+                )
 
         monkeypatch.setattr(plugin.codeforces, "problems", problems)
         monkeypatch.setattr(plugin.codeforces, "statement", statement)
@@ -374,6 +382,54 @@ def test_private_or_disallowed_group_is_ignored(adapter, command):
             ):
                 await getattr(plugin, command)(event)
                 assert not event.sent and not event.stopped
+        finally:
+            await plugin.terminate()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("mode", "submission"),
+    [("hint", "不会，给点提示"), ("explain", "请完整讲解并给代码")],
+)
+def test_guidance_keeps_round_active_and_source_hidden(
+    adapter, round_, mode, submission
+):
+    async def generate(**_):
+        return SimpleNamespace(
+            completion_text=json.dumps(
+                {
+                    "verdict": "needs_more",
+                    "mode": mode,
+                    "complete": False,
+                    "feedback": f"先看一个小例子。CF {round_.problem.key} "
+                    f"{round_.problem.name} {round_.problem.url}",
+                    "proof": "INTERNAL_PROOF",
+                    "complexity": "",
+                    "counterexample": "INTERNAL_EVIDENCE",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    async def scenario():
+        plugin = adapter.CFChallengePlugin(
+            SimpleNamespace(llm_generate=generate), {"provider_id": "test-model"}
+        )
+        event = Event("/submit " + submission)
+        active = replace(round_, scope=plugin._scope(event))
+        plugin.store.save(active)
+        try:
+            await plugin.submit(event)
+            current = plugin.store.active(active.scope)
+            assert current.id == active.id and not current.solver
+            assert current.dialogues[event.sender][0]["content"] == submission
+            text = "\n".join(event.sent)
+            assert active.problem.key not in text
+            assert active.problem.name not in text and active.problem.url not in text
+            assert "INTERNAL_PROOF" not in text and "INTERNAL_EVIDENCE" not in text
+            assert active.prepared.reference not in text
+            assert event.stopped and not event.call_llm
         finally:
             await plugin.terminate()
 

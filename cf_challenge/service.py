@@ -10,7 +10,8 @@ from collections.abc import Awaitable, Callable
 
 from .codeforces import Codeforces
 from .llm import Evaluator
-from .models import ChallengeError, ProblemRange, Review, Round
+from .models import ChallengeError, ProblemRange, Review, Round, UnsupportedStatement
+from .presentation import hide_identity
 from .storage import Store
 
 
@@ -64,8 +65,19 @@ class Challenges:
                     "当前范围内没有未出过的可用题。请调整范围；"
                     "如果启用了 local_only，还需要先导入相应题面。"
                 )
-            problem = random.SystemRandom().choice(candidates)
-            source = await self.codeforces.statement(problem)
+            attempts = min(3, len(candidates))
+            for problem in random.SystemRandom().sample(candidates, attempts):
+                try:
+                    source = await self.codeforces.statement(problem)
+                except UnsupportedStatement:
+                    continue
+                break
+            else:
+                raise ChallengeError(
+                    f"本次尝试的 {attempts} 道题均含暂不支持的图片、表格或公式格式，"
+                    "未发布新题。请重新发送 /new、调整范围，"
+                    "或导入可完整表达题意的本地题面。"
+                )
             prepared = await evaluator.prepare(source)
             round_ = Round(
                 uuid.uuid4().hex,
@@ -109,13 +121,29 @@ class Challenges:
                     f"请再等 {int(self.cooldown - elapsed) + 1} 秒后提交。"
                 )
             round_.attempts[sender] = now
+            history = list(round_.dialogues.get(sender, []))
+            round_.dialogues.setdefault(sender, []).append(
+                {"role": "user", "content": solution.strip()}
+            )
             self.store.save(round_)
             review = await evaluator.judge(
-                round_.source, round_.prepared, solution.strip()
+                round_.source, round_.prepared, solution.strip(), history
             )
             if review.verdict == "accepted":
+                if review.mode != "check" or review.complete is not True:
+                    raise ChallengeError(
+                        "评审结果不满足完整解法通过条件，本次未判定通过。"
+                    )
                 round_.status, round_.solver = "solved", sender
-                self.store.save(round_)
+                round_.dialogues.clear()
+            else:
+                round_.dialogues[sender].append(
+                    {
+                        "role": "assistant",
+                        "content": hide_identity(review.feedback, round_.problem),
+                    }
+                )
+            self.store.save(round_)
             return round_, review
 
     async def reveal(self, scope: str) -> Round:
@@ -124,6 +152,7 @@ class Challenges:
             if round_ is None:
                 raise ChallengeError("本群没有进行中的题。")
             round_.status = "revealed"
+            round_.dialogues.clear()
             self.store.save(round_)
             return round_
 

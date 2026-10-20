@@ -28,11 +28,11 @@ HELP = """CF 群聊解题挑战
 /cf 范围 {"tags":["dp"],"exclude_tags":[],"min_contest":1500,"max_contest":2200}
 JSON 也支持 min_rating、max_rating；未填写的条件保留原值。
 tags 中的标签需全部满足；带空格的标签也可以放在 JSON 字符串内。
-/submit <sol>：提交文字解法，不需要 @机器人
+/submit <sol>：提交思路、补充修正或请求提示，不需要 @机器人
 /giveup：放弃本轮并公布原题来源
 默认仅 AstrBot 管理员及 QQ 群主／管理员能出题、改范围、放弃本轮。
 同群解答按提交顺序排队；本轮通过后不再评审剩余提交。
-每人提交有冷却时间；补充时请把完整方案一起重发。"""
+每人提交有冷却时间；同轮同用户可直接补充或修正，也可提交“不会”请求提示。"""
 
 
 class CFChallengePlugin(Star):
@@ -207,7 +207,7 @@ class CFChallengePlugin(Star):
 
     @filter.command("submit")
     async def submit(self, event: AstrMessageEvent):
-        """提交完整文字解法，无需 @机器人。"""
+        """提交思路、补充修正或请求提示，无需 @机器人。"""
         parts = event.get_message_str().strip().split(maxsplit=1)
         await self._execute(event, "submit", parts[1] if len(parts) > 1 else "")
 

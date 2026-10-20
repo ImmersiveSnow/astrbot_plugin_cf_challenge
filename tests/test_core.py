@@ -48,6 +48,8 @@ class Generator:
 def verdict(value="accepted", **changes):
     return {
         "verdict": value,
+        "mode": "check",
+        "complete": value == "accepted",
         "feedback": "逐个累加能得到所有数的和。",
         "proof": "每个输入恰好计入一次。",
         "complexity": "O(n) 时间，O(1) 额外空间。",
@@ -195,6 +197,65 @@ def test_math_in_specifications_and_note_is_preserved():
     assert "$$$x &lt; y$$$" in source.note
 
 
+@pytest.mark.parametrize(
+    ("markup", "tex"),
+    [
+        ('<span class="tex-span">x<sub>i</sub></span>', "x_{i}"),
+        ("x<sub>i</sub>", "x_{i}"),
+        ("10<sup>9</sup>", "10^{9}"),
+        ("<b>x</b><sub>i</sub>", r"\boldsymbol{x}_{i}"),
+        ("<i>x</i><sub><i>i</i>+1</sub><sup>2</sup>", "x_{i+1}^{2}"),
+        (
+            '<span class="tex-span">x<sub>i<sup>2</sup></sub></span>',
+            "x_{i^{2}}",
+        ),
+        ("<span>x<sub>i</sub></span><sub>j</sub>", "{x_{i}}_{j}"),
+        (
+            '<span class="tex-span">{x<sub>i</sub> | i&lt;n}</span>',
+            r"\{x_{i} | i<n\}",
+        ),
+    ],
+)
+def test_html_indices_reach_statement_as_protected_tex(markup, tex):
+    source = parse_statement(HTML.replace("$$$n$$$", markup))
+    assert f"$$${tex}$$$" in source.body
+    assert source.samples == (("2\n1 2", "3\n4"),)
+
+
+def test_html_indices_in_all_fields_leave_plain_identifiers_and_samples_unchanged():
+    html = (
+        HTML.replace("$$$n$$$", "xi and x<sub>i</sub>")
+        .replace("Two integers.", "Up to 10<sup>9</sup>.")
+        .replace("The sum.", "Print a<sub>i</sub>.")
+        .replace("A small example.", "Check x<sub>i+1</sub>.")
+        .replace(
+            '<div class="test-example-line">2</div>',
+            '<div class="test-example-line">x<sub>i</sub> $$$x_i$$$ &lt;sub&gt;</div>',
+        )
+    )
+    source = parse_statement(html)
+    assert "xi and $$$x_{i}$$$" in source.body
+    assert "$$$10^{9}$$$" in source.input_spec
+    assert "$$$a_{i}$$$" in source.output_spec
+    assert "$$$x_{i+1}$$$" in source.note
+    assert source.samples == (("xi $$$x_i$$$ <sub>\n1 2", "3\n4"),)
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "<span><sub>i</sub></span>",
+        "x<sub></sub>",
+        "x<sub>i</sub><sub>j</sub>",
+        '<span class="tex-span">$$$x$$$<sub>i</sub></span>',
+        '<span class="tex-span">x<sub><img src="diagram"></sub></span>',
+    ],
+)
+def test_ambiguous_html_indices_are_not_silently_flattened(markup):
+    with pytest.raises(ChallengeError):
+        parse_statement(HTML.replace("$$$n$$$", markup))
+
+
 def test_multiple_sample_pairs_remain_unmodified():
     html = HTML.replace(
         '<div class="output"><pre>3<br>4</pre></div>',
@@ -222,6 +283,20 @@ def test_missing_formula_stops_before_audit(source, translated):
     assert len(generator.calls) == 1
 
 
+def test_html_index_loss_in_translation_is_rejected_before_publication():
+    source = parse_statement(HTML.replace("$$$n$$$", "x<sub>i</sub>"))
+    generator = Generator(
+        {
+            "body": "求 xi 的总和。",
+            "input_spec": "两个整数。",
+            "output_spec": "输出总和。",
+            "note": "一个示例。",
+        }
+    )
+    with pytest.raises(ChallengeError):
+        run(Evaluator(generator).prepare(source))
+
+
 @pytest.mark.parametrize("ok", [False, "true", None])
 def test_audit_must_explicitly_accept(source, translated, ok):
     generator = Generator(translated, {"translation_ok": ok, "reference": "Sum once."})
@@ -230,11 +305,21 @@ def test_audit_must_explicitly_accept(source, translated, ok):
 
 
 def test_two_independent_acceptances_needed(source, prepared):
+    history = [
+        {"role": "user", "content": "我从左到右累加。"},
+        {"role": "assistant", "content": "请继续说明。"},
+    ]
     generator = Generator(verdict(), verdict())
-    result = run(Evaluator(generator).judge(source, prepared, "Read all and add once."))
+    result = run(
+        Evaluator(generator).judge(
+            source, prepared, "Read all and add once.", history=history
+        )
+    )
     assert result.verdict == "accepted" and len(generator.calls) == 2
     assert generator.calls[0][1] == generator.calls[1][1]
+    assert generator.calls[0][1]["conversation_history"] == history
     assert "participant_solution" in generator.calls[1][1]
+    assert "first_review" not in generator.calls[1][1]
 
 
 def test_disagreement_is_needs_more(source, prepared):
@@ -244,9 +329,47 @@ def test_disagreement_is_needs_more(source, prepared):
 
 
 def test_wrong_without_concrete_basis_is_needs_more(source, prepared):
-    generator = Generator(verdict("incorrect"))
+    generator = Generator(verdict("incorrect", complete=True))
     result = run(Evaluator(generator).judge(source, prepared, "My approach"))
     assert result.verdict == "needs_more" and len(generator.calls) == 1
+    assert result.mode == "check" and result.complete is True
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"mode": "other"},
+        {"mode": "hint", "verdict": "accepted"},
+        {"mode": "explain", "verdict": "accepted"},
+        {"mode": "check", "complete": "true"},
+        {"complete": False},
+        {"mode": "hint", "verdict": "needs_more"},
+    ],
+)
+def test_invalid_or_contradictory_scope_never_accepts(source, prepared, changes):
+    response = verdict(**changes)
+    with pytest.raises(ChallengeError):
+        run(Evaluator(Generator(response)).judge(source, prepared, "Anything"))
+
+
+@pytest.mark.parametrize("field", ["mode", "complete"])
+def test_missing_scope_field_is_rejected(source, prepared, field):
+    response = verdict()
+    del response[field]
+    with pytest.raises(ChallengeError):
+        run(Evaluator(Generator(response)).judge(source, prepared, "Anything"))
+
+
+@pytest.mark.parametrize("mode", ["hint", "explain"])
+def test_guidance_cannot_settle_a_solution(source, prepared, mode):
+    response = verdict(
+        "needs_more",
+        mode=mode,
+        complete=False,
+        feedback="先试一个很小的输入。",
+    )
+    result = run(Evaluator(Generator(response)).judge(source, prepared, ""))
+    assert result.verdict == "needs_more" and result.mode == mode
 
 
 @pytest.mark.parametrize("response", ["not json", [], verdict(proof=""), verdict("OK")])
@@ -270,7 +393,6 @@ def test_only_public_fields_sent_and_failure_does_not_reveal(round_):
     assert (
         "1000A" not in text and "Hidden Identity" not in text and "https://" not in text
     )
-    assert "需要补充" in text
     assert "1000A" in review_text(Review(**verdict()), round_)
 
 

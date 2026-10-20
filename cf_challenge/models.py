@@ -11,6 +11,10 @@ class ChallengeError(Exception):
     """可以直接发给群友的错误，不包含未揭晓的题号或内部服务细节。"""
 
 
+class UnsupportedStatement(ChallengeError):
+    """原题含无法完整展示的内容；允许出题流程换题，但不能丢弃内容。"""
+
+
 @dataclass(frozen=True)
 class Problem:
     contest_id: int
@@ -170,6 +174,8 @@ class Review:
     proof: str
     complexity: str
     counterexample: str = ""
+    mode: str = "check"
+    complete: bool = False
 
 
 @dataclass
@@ -183,6 +189,7 @@ class Round:
     solver: str = ""
     created_at: float = 0.0
     attempts: dict[str, float] = field(default_factory=dict)
+    dialogues: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
