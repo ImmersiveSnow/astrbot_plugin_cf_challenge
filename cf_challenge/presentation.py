@@ -47,9 +47,6 @@ def statement_sections(round_: Round) -> list[StatementSection]:
     sections = [
         StatementSection(
             f"算法挑战 #{round_.id[:8]}",
-            "请用 /submit <sol> 提交解题思路，说明算法怎么做、为什么可行；"
-            "可用口语表达。\n"
-            "评审结果：通过／有错误／需要补充。通过后揭晓原题。\n"
             f"时间限制：{source.time_limit}\n内存限制：{source.memory_limit}",
         ),
         StatementSection("题目描述", translated.body),
