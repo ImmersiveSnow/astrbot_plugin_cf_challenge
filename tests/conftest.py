@@ -1,5 +1,3 @@
-from dataclasses import asdict
-
 import pytest
 
 from cf_challenge.models import Prepared, Problem, Round, Statement
@@ -38,8 +36,3 @@ def round_(problem, source, prepared):
     return Round(
         "abcdef123456", "qq:group:123", problem, source, prepared, status="active"
     )
-
-
-@pytest.fixture
-def translated(prepared):
-    return {k: v for k, v in asdict(prepared).items() if k != "reference"}

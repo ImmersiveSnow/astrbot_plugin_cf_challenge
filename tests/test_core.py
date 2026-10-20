@@ -40,6 +40,8 @@ class Generator:
     async def __call__(self, system, prompt):
         self.calls.append((system, json.loads(prompt)))
         value = self.responses.pop(0)
+        if callable(value):
+            value = value(self.calls[-1][1])
         return (
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         )
@@ -266,21 +268,103 @@ def test_multiple_sample_pairs_remain_unmodified():
     assert parse_statement(html).samples == (("2\n1 2", "3\n4"), ("5\n6", "11"))
 
 
-def test_preparation_keeps_reference_private(source, translated):
+def translating_model(data):
+    fields = {}
+    for name in ("body", "input_spec", "output_spec", "note"):
+        text = data[name]
+        for original, chinese in (
+            ("Given ", "给出 "),
+            (" integers, find their sum.", " 个整数，求它们的和。"),
+            ("First ", "先输入 "),
+            (", then the integers. ", "，再输入这些整数。"),
+            ("Print the sum.", "输出总和。"),
+        ):
+            text = text.replace(original, chinese)
+        # 模拟模型惯常的公式改写；占位保护应让它根本接触不到公式原文。
+        fields[name] = text.replace("$$$", "$").replace("_{i}", "_i").replace(".", "。")
+    return fields
+
+
+def test_translation_preserves_formulas_without_model_copying_them(source, prepared):
     generator = Generator(
-        translated, {"translation_ok": True, "reference": "Sum once."}
+        translating_model, {"translation_ok": True, "reference": "Sum once."}
     )
     result = run(Evaluator(generator).prepare(source))
-    assert result.reference == "Sum once."
-    assert generator.calls[0][1]["samples"] == [["3\n1 2 3", "6"]]
+    assert result == replace(prepared, reference="Sum once.")
 
 
-def test_missing_formula_stops_before_audit(source, translated):
-    translated["body"] = "求总和。"
-    generator = Generator(translated)
-    with pytest.raises(ChallengeError, match="公式"):
-        run(Evaluator(generator).prepare(source))
-    assert len(generator.calls) == 1
+@pytest.mark.parametrize(
+    "damage", ["missing", "duplicated", "moved", "new_formula", "malformed_extra"]
+)
+def test_damaged_formula_placeholders_stop_before_audit(source, damage):
+    def translate(data):
+        fields = translating_model(data)
+        token = (
+            data["body"]
+            .removeprefix("Given ")
+            .removesuffix(" integers, find their sum.")
+        )
+        if damage == "missing":
+            fields["body"] = fields["body"].replace(token, "")
+        elif damage == "duplicated":
+            fields["body"] += token
+        elif damage == "moved":
+            fields["body"] = fields["body"].replace(token, "")
+            fields["output_spec"] += token
+        elif damage == "new_formula":
+            fields["body"] += "$z$"
+        else:
+            fields["body"] += token[:-2] + "broken]]"
+        return fields
+
+    with pytest.raises(ChallengeError):
+        run(Evaluator(Generator(translate)).prepare(source))
+
+
+@pytest.mark.parametrize(
+    "formula",
+    ["$$$x_{i}$$$", "$$x_{i}$$", r"$x_i + \$1$", r"\(x_{i}\)", r"\[x_{i}\]"],
+)
+def test_each_supported_formula_delimiter_and_occurrence_is_restored(source, formula):
+    source = replace(
+        source, body=f"Use {formula} and {formula}.", input_spec="Read values."
+    )
+    generator = Generator(
+        translating_model, {"translation_ok": True, "reference": "Reference."}
+    )
+    result = run(Evaluator(generator).prepare(source))
+    assert result.body == f"Use {formula} and {formula}。"
+
+
+def test_formula_mentions_can_be_reordered_within_the_same_field(source):
+    source = replace(
+        source,
+        body="The sum of $$$x_{i}$$$ and $$$y$$$.",
+        input_spec="Read values.",
+    )
+
+    def translate(data):
+        fields = translating_model(data)
+        first, second = (
+            data["body"].removeprefix("The sum of ").removesuffix(".").split(" and ")
+        )
+        fields["body"] = f"求 {second} 与 {first} 的和。"
+        return fields
+
+    generator = Generator(
+        translate, {"translation_ok": True, "reference": "Addition is commutative."}
+    )
+    result = run(Evaluator(generator).prepare(source))
+    assert result.body == "求 $$$y$$$ 与 $$$x_{i}$$$ 的和。"
+
+
+def test_literal_placeholder_like_text_does_not_collide_with_formulas(source):
+    source = replace(source, body="Literal [[CF_MATH_0]]; use $$$x_{i}$$$.")
+    generator = Generator(
+        translating_model, {"translation_ok": True, "reference": "Reference."}
+    )
+    result = run(Evaluator(generator).prepare(source))
+    assert result.body == "Literal [[CF_MATH_0]]; use $$$x_{i}$$$。"
 
 
 def test_html_index_loss_in_translation_is_rejected_before_publication():
@@ -298,8 +382,10 @@ def test_html_index_loss_in_translation_is_rejected_before_publication():
 
 
 @pytest.mark.parametrize("ok", [False, "true", None])
-def test_audit_must_explicitly_accept(source, translated, ok):
-    generator = Generator(translated, {"translation_ok": ok, "reference": "Sum once."})
+def test_audit_must_explicitly_accept(source, ok):
+    generator = Generator(
+        translating_model, {"translation_ok": ok, "reference": "Sum once."}
+    )
     with pytest.raises(ChallengeError, match="校对"):
         run(Evaluator(generator).prepare(source))
 

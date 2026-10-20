@@ -113,7 +113,9 @@ class Challenges:
         async with self._lock(scope, wait=True):
             round_ = self.store.active(scope)
             if round_ is None or round_.id != submitted_round.id:
-                raise ChallengeError("提交对应的题目已结束，本次排队解答不再评审。")
+                raise ChallengeError(
+                    "本轮已结束，你排队的这条补充无需再评审，也不会提交到新题。"
+                )
             now = time.time()
             elapsed = now - round_.attempts.get(sender, 0)
             if elapsed < self.cooldown:
