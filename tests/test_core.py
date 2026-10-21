@@ -523,6 +523,65 @@ async def deliver(_):
     pass
 
 
+@pytest.mark.parametrize(
+    ("result", "recheck"),
+    [
+        pytest.param("incorrect", False, id="incorrect"),
+        pytest.param("needs_more", False, id="ambiguous"),
+        pytest.param("incorrect", True, id="recheck-disagrees"),
+    ],
+)
+def test_check_keeps_solution_details_out_of_public_feedback_and_history(
+    tmp_path, problem, source, prepared, result, recheck
+):
+    leaked_feedback = (
+        "请澄清：你指的是数组 d 中的负数，还是排序后两两差 d_v-d_u 中的负数？"
+        if result == "needs_more"
+        else "思路有问题：当前结论不成立。漏掉了负权边，反例 d=[0,1,2,3]，最优值 -7。"
+    )
+    private_proof = "PRIVATE_PROOF：加入全部负权边，再用相邻差连接。"
+    evidence = "PRIVATE_COUNTEREXAMPLE：d=[0,1,2,3]，存在总代价为 -7 的合法构造。"
+    response = verdict(
+        result,
+        feedback=leaked_feedback,
+        proof=private_proof,
+        counterexample=evidence if result == "incorrect" else "",
+    )
+    generator = Generator(verdict(), response) if recheck else Generator(response)
+
+    async def scenario():
+        store = Store(tmp_path)
+        service = Challenges(
+            store, Catalog(problem, source), ProblemRange(), cooldown=0
+        )
+        try:
+            started = await service.start("group", Evaluation(prepared), deliver)
+            round_, review = await service.submit(
+                "group", "alice", "n >= 3 是 -mxd，其他情况是 0", Evaluator(generator)
+            )
+            assert review.verdict == ("needs_more" if recheck else result)
+            assert review.proof == private_proof
+            if result == "incorrect" and not recheck:
+                assert review.counterexample == evidence
+            public = review_text(review, round_)
+            saved = store.active("group")
+            assert saved.id == started.id
+            for content in (public, repr(saved.dialogues)):
+                for secret in (
+                    "负权边",
+                    "d_v-d_u",
+                    "d=[0,1,2,3]",
+                    "-7",
+                    "PRIVATE_PROOF",
+                    "PRIVATE_COUNTEREXAMPLE",
+                ):
+                    assert secret not in content
+        finally:
+            store.close()
+
+    run(scenario())
+
+
 def test_restart_keeps_active_round_and_seen_history(tmp_path, round_):
     store = Store(tmp_path)
     store.save(round_)
