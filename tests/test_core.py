@@ -390,28 +390,29 @@ def test_audit_must_explicitly_accept(source, ok):
         run(Evaluator(generator).prepare(source))
 
 
-def test_two_independent_acceptances_needed(source, prepared):
-    history = [
-        {"role": "user", "content": "我从左到右累加。"},
-        {"role": "assistant", "content": "请继续说明。"},
-    ]
-    generator = Generator(verdict(), verdict())
-    result = run(
-        Evaluator(generator).judge(
-            source, prepared, "Read all and add once.", history=history
+def test_complete_solution_with_empty_feedback_settles_round(
+    tmp_path, problem, source, prepared
+):
+    generator = Generator(verdict(feedback=""))
+
+    async def scenario():
+        store = Store(tmp_path)
+        service = Challenges(
+            store, Catalog(problem, source), ProblemRange(), cooldown=0
         )
-    )
-    assert result.verdict == "accepted" and len(generator.calls) == 2
-    assert generator.calls[0][1] == generator.calls[1][1]
-    assert generator.calls[0][1]["conversation_history"] == history
-    assert "participant_solution" in generator.calls[1][1]
-    assert "first_review" not in generator.calls[1][1]
+        try:
+            await service.start("group", Evaluation(prepared), deliver)
+            round_, review = await service.submit(
+                "group", "alice", "从左到右把所有输入累加一次。", Evaluator(generator)
+            )
+            assert review.verdict == "accepted"
+            assert round_.status == "solved" and round_.solver == "alice"
+            assert round_.dialogues == {}
+            assert store.active("group") is None
+        finally:
+            store.close()
 
-
-def test_disagreement_is_needs_more(source, prepared):
-    generator = Generator(verdict(), verdict("incorrect", counterexample="n=1"))
-    result = run(Evaluator(generator).judge(source, prepared, "My approach"))
-    assert result.verdict == "needs_more"
+    run(scenario())
 
 
 def test_wrong_without_concrete_basis_is_needs_more(source, prepared):
@@ -438,8 +439,19 @@ def test_invalid_or_contradictory_scope_never_accepts(source, prepared, changes)
         run(Evaluator(Generator(response)).judge(source, prepared, "Anything"))
 
 
-@pytest.mark.parametrize("field", ["mode", "complete"])
-def test_missing_scope_field_is_rejected(source, prepared, field):
+@pytest.mark.parametrize(
+    "field",
+    [
+        "verdict",
+        "mode",
+        "complete",
+        "feedback",
+        "proof",
+        "complexity",
+        "counterexample",
+    ],
+)
+def test_missing_review_field_is_rejected(source, prepared, field):
     response = verdict()
     del response[field]
     with pytest.raises(ChallengeError):
@@ -458,7 +470,17 @@ def test_guidance_cannot_settle_a_solution(source, prepared, mode):
     assert result.verdict == "needs_more" and result.mode == mode
 
 
-@pytest.mark.parametrize("response", ["not json", [], verdict(proof=""), verdict("OK")])
+@pytest.mark.parametrize(
+    "response",
+    [
+        "not json",
+        [],
+        verdict(proof=""),
+        verdict(complexity=""),
+        verdict("needs_more", feedback=""),
+        verdict("OK"),
+    ],
+)
 def test_bad_model_response_never_accepts(source, prepared, response):
     with pytest.raises(ChallengeError):
         run(Evaluator(Generator(response)).judge(source, prepared, "Anything"))
@@ -521,65 +543,6 @@ class Evaluation:
 
 async def deliver(_):
     pass
-
-
-@pytest.mark.parametrize(
-    ("result", "recheck"),
-    [
-        pytest.param("incorrect", False, id="incorrect"),
-        pytest.param("needs_more", False, id="ambiguous"),
-        pytest.param("incorrect", True, id="recheck-disagrees"),
-    ],
-)
-def test_check_keeps_solution_details_out_of_public_feedback_and_history(
-    tmp_path, problem, source, prepared, result, recheck
-):
-    leaked_feedback = (
-        "请澄清：你指的是数组 d 中的负数，还是排序后两两差 d_v-d_u 中的负数？"
-        if result == "needs_more"
-        else "思路有问题：当前结论不成立。漏掉了负权边，反例 d=[0,1,2,3]，最优值 -7。"
-    )
-    private_proof = "PRIVATE_PROOF：加入全部负权边，再用相邻差连接。"
-    evidence = "PRIVATE_COUNTEREXAMPLE：d=[0,1,2,3]，存在总代价为 -7 的合法构造。"
-    response = verdict(
-        result,
-        feedback=leaked_feedback,
-        proof=private_proof,
-        counterexample=evidence if result == "incorrect" else "",
-    )
-    generator = Generator(verdict(), response) if recheck else Generator(response)
-
-    async def scenario():
-        store = Store(tmp_path)
-        service = Challenges(
-            store, Catalog(problem, source), ProblemRange(), cooldown=0
-        )
-        try:
-            started = await service.start("group", Evaluation(prepared), deliver)
-            round_, review = await service.submit(
-                "group", "alice", "n >= 3 是 -mxd，其他情况是 0", Evaluator(generator)
-            )
-            assert review.verdict == ("needs_more" if recheck else result)
-            assert review.proof == private_proof
-            if result == "incorrect" and not recheck:
-                assert review.counterexample == evidence
-            public = review_text(review, round_)
-            saved = store.active("group")
-            assert saved.id == started.id
-            for content in (public, repr(saved.dialogues)):
-                for secret in (
-                    "负权边",
-                    "d_v-d_u",
-                    "d=[0,1,2,3]",
-                    "-7",
-                    "PRIVATE_PROOF",
-                    "PRIVATE_COUNTEREXAMPLE",
-                ):
-                    assert secret not in content
-        finally:
-            store.close()
-
-    run(scenario())
 
 
 def test_restart_keeps_active_round_and_seen_history(tmp_path, round_):
