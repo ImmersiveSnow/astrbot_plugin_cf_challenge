@@ -35,6 +35,15 @@ tags 中的标签需全部满足；带空格的标签也可以放在 JSON 字符
 每人提交有冷却时间；同轮同用户可直接补充或修正，也可提交“不会”请求提示。"""
 
 
+class _MalformedSubmitFilter(filter.CustomFilter):
+    """拦截紧贴中文或符号的提交，避免漏匹配后进入日常聊天。"""
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        return event.is_at_or_wake_command and bool(
+            re.match(r"^/?submit[^\sA-Za-z0-9_]", event.get_message_str().strip())
+        )
+
+
 class CFChallengePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -210,6 +219,18 @@ class CFChallengePlugin(Star):
         """提交思路、补充修正或请求提示，无需 @机器人。"""
         parts = event.get_message_str().strip().split(maxsplit=1)
         await self._execute(event, "submit", parts[1] if len(parts) > 1 else "")
+
+    @filter.custom_filter(_MalformedSubmitFilter)
+    async def malformed_submit(self, event: AstrMessageEvent):
+        """提交缺少分隔空格时只提示用法，不进入评审或日常聊天。"""
+        if not self._allowed(event):
+            return
+        self._claim(event)
+        await self._say(
+            event,
+            "请在 /submit 后加空格，例如 /submit 都取abs。"
+            "这条消息尚未提交评审，请加空格后重发。",
+        )
 
     @filter.command("giveup")
     async def giveup(self, event: AstrMessageEvent):

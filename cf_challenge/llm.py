@@ -175,7 +175,7 @@ class Evaluator:
     async def _review(self, round_data: dict, *, recheck: bool = False) -> Review:
         value = parse_json(
             await self.generate(
-                JUDGE + (RECHECK if recheck else ""),
+                (RECHECK if recheck else "") + JUDGE,
                 json.dumps(round_data, ensure_ascii=False),
             )
         )

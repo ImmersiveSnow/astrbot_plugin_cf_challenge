@@ -56,6 +56,8 @@ def adapter(tmp_path, monkeypatch):
             "AstrMessageEvent": object,
             "filter": SimpleNamespace(
                 command=decorator,
+                custom_filter=decorator,
+                CustomFilter=object,
             ),
         },
         "astrbot.api.star": {
